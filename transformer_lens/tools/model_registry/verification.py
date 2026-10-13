@@ -32,10 +32,13 @@ class VerificationRecord:
     notes: Optional[str] = None
     invalidated: bool = False
     invalidation_reason: Optional[str] = None
+    # Optional so historical records remain distinguishable as legacy records.
+    status: Optional[int] = None
+    phase_scores: Optional[dict[int, Optional[float]]] = None
 
     def to_dict(self) -> dict:
         """Convert to a JSON-serializable dictionary."""
-        return {
+        data = {
             "model_id": self.model_id,
             "architecture_id": self.architecture_id,
             "verified_date": self.verified_date.isoformat(),
@@ -45,6 +48,13 @@ class VerificationRecord:
             "invalidated": self.invalidated,
             "invalidation_reason": self.invalidation_reason,
         }
+        if self.status is not None:
+            data["status"] = self.status
+        if self.phase_scores is not None:
+            data["phase_scores"] = {
+                str(phase): score for phase, score in self.phase_scores.items()
+            }
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "VerificationRecord":
@@ -58,6 +68,12 @@ class VerificationRecord:
             notes=data.get("notes"),
             invalidated=data.get("invalidated", False),
             invalidation_reason=data.get("invalidation_reason"),
+            status=data.get("status"),
+            phase_scores=(
+                {int(phase): score for phase, score in data["phase_scores"].items()}
+                if data.get("phase_scores") is not None
+                else None
+            ),
         )
 
 
@@ -92,13 +108,10 @@ class VerificationHistory:
         )
 
     def get_record(self, model_id: str) -> Optional[VerificationRecord]:
-        """Get the most recent valid verification record for a model.
+        """Get the latest non-invalidated verification attempt for a model.
 
-        Args:
-            model_id: The model ID to look up
-
-        Returns:
-            The verification record, or None if not found or invalidated
+        Legacy records without a status are returned as before. New records may
+        represent either a successful or failed attempt.
         """
         for record in reversed(self.records):
             if record.model_id == model_id and not record.invalidated:
@@ -114,7 +127,10 @@ class VerificationHistory:
         Returns:
             True if the model has a valid (non-invalidated) verification
         """
-        return self.get_record(model_id) is not None
+        record = self.get_record(model_id)
+        # Records written before result statuses were introduced represented
+        # successful verifications, so preserve their historical behavior.
+        return record is not None and record.status in (None, 1)
 
     def add_record(self, record: VerificationRecord) -> None:
         """Add a new verification record.
