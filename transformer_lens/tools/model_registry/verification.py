@@ -9,6 +9,38 @@ from datetime import date, datetime
 from typing import Literal, Optional
 
 
+def _legacy_result_from_notes(notes: Optional[str]) -> Optional[bool]:
+    """Infer an old attempt's outcome from note formats used by the runner.
+
+    Returns None for notes without a recognized outcome so callers can
+    preserve the historical existence-based behavior for records that carry no
+    usable outcome signal.
+    """
+    if not notes:
+        return None
+
+    note = notes.strip().casefold()
+    if note.startswith((
+        "benchmark passed",
+        "full verification completed",
+        "core verification completed",
+    )):
+        return True
+
+    if note.startswith((
+        "below threshold:",
+        "below ",  # Older records used e.g. "Below 50.0% threshold: ..."
+        "core failed:",
+        "core verification failed:",
+        "process crash during benchmark",
+        "worker timed out",
+        "cannot access local variable",
+        "cuda error:",
+    )):
+        return False
+    return None
+
+
 @dataclass
 class VerificationRecord:
     """A record of a model verification.
@@ -118,8 +150,12 @@ class VerificationHistory:
         """Get the latest non-invalidated verification attempt for a model.
 
         Legacy records without a status are returned as before. New records may
-        represent either a successful or failed attempt.
+        represent either a successful or failed attempt. Records are appended
+        in attempt order, so list order breaks ties when multiple attempts have
+        the same verified_date (which stores only a calendar date).
         """
+        # Walk backward so later same-day attempts take precedence, while
+        # skipping invalidated attempts to find the latest eligible record.
         for record in reversed(self.records):
             if record.model_id == model_id and not record.invalidated:
                 return record
@@ -139,10 +175,22 @@ class VerificationHistory:
             return False
         if record.result is not None:
             return record.result == "passed"
-        # Legacy records have no explicit result. Preserve their old lookup
-        # behavior, falling back to numeric status where the transitional
-        # schema already stored one.
-        return record.status in (None, 1)
+        # Some transitional rows already have a numeric status. Trust it before
+        # interpreting legacy notes, which may contain incidental words such
+        # as "failed" while describing a successful run with tolerated issues.
+        if record.status is not None:
+            return record.status == 1
+
+        # Older history predates both explicit results and numeric statuses.
+        # Its runner notes have stable success/failure prefixes; infer those
+        # without migrating or rewriting the saved records.
+        inferred_result = _legacy_result_from_notes(record.notes)
+        if inferred_result is not None:
+            return inferred_result
+
+        # Keep the former existence-based behavior for legacy rows without a
+        # recognized outcome note.
+        return True
 
     def add_record(self, record: VerificationRecord) -> None:
         """Add a new verification record.
