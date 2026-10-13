@@ -1074,6 +1074,7 @@ def verify_models(
                     sanitize_fn=_sanitize_note,
                     status=partial_status,
                     phase_scores=filtered_scores,
+                    result="failed" if partial_status == STATUS_FAILED else "passed",
                 )
                 if partial_status == STATUS_FAILED:
                     progress.failed.append(model_id)
@@ -1104,6 +1105,7 @@ def verify_models(
                 notes=note,
                 status=STATUS_VERIFIED,
                 phase_scores=phase_scores,
+                result="passed",
             )
             progress.verified.append(model_id)
         else:
@@ -1131,6 +1133,7 @@ def verify_models(
                 sanitize_fn=_sanitize_note,
                 status=STATUS_FAILED,
                 phase_scores=phase_scores,
+                result="failed",
             )
             progress.failed.append(model_id)
 
