@@ -326,7 +326,7 @@ class TestVerificationHistory:
         assert "status" not in legacy.to_dict()
         assert "phase_scores" not in legacy.to_dict()
 
-    def test_get_record_returns_most_recent_valid(self):
+    def test_get_record_returns_most_recent_non_invalidated_attempt(self):
         from transformer_lens.tools.model_registry.verification import (
             VerificationHistory,
             VerificationRecord,
@@ -516,6 +516,23 @@ class TestValidate:
             registry_data_dir / "verification_history.json", "verification_history"
         )
         assert result.valid
+
+    def test_validate_verification_history_result_fields(self, registry_data_dir):
+        from transformer_lens.tools.model_registry.validate import validate_json_schema
+
+        path = registry_data_dir / "verification_history.json"
+        data = json.loads(path.read_text())
+        data["records"][0]["status"] = 3
+        data["records"][0]["phase_scores"] = {"1": 0.0, "2": None}
+        path.write_text(json.dumps(data, indent=2))
+
+        result = validate_json_schema(path, "verification_history")
+        assert result.valid
+
+        data["records"][0]["status"] = 4
+        path.write_text(json.dumps(data, indent=2))
+        result = validate_json_schema(path, "verification_history")
+        assert not result.valid
 
     def test_validate_invalid_missing_required_field(self):
         from transformer_lens.tools.model_registry.validate import (
