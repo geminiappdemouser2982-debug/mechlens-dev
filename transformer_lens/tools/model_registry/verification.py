@@ -22,6 +22,8 @@ class VerificationRecord:
         notes: Optional notes about the verification
         invalidated: Whether this verification has been invalidated
         invalidation_reason: Reason for invalidation if applicable
+        status: Verification result status, or None for a legacy record
+        phase_scores: Per-phase scores, or None when unavailable
     """
 
     model_id: str
