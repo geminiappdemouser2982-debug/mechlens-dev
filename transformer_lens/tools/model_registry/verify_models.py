@@ -1067,6 +1067,9 @@ def verify_models(
                     note=partial_note,
                     sanitize_fn=_sanitize_note,
                 )
+                attempt_result = (
+                    "passed" if final_status == STATUS_VERIFIED else "failed"
+                )
                 add_verification_record(
                     model_id,
                     arch,
@@ -1074,9 +1077,9 @@ def verify_models(
                     sanitize_fn=_sanitize_note,
                     status=partial_status,
                     phase_scores=filtered_scores,
-                    result="failed" if partial_status == STATUS_FAILED else "passed",
+                    result=attempt_result,
                 )
-                if partial_status == STATUS_FAILED:
+                if attempt_result == "failed":
                     progress.failed.append(model_id)
                 else:
                     progress.verified.append(model_id)
