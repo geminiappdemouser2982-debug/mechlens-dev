@@ -400,30 +400,44 @@ def _validate_verification_record(data: dict, path: str) -> list[ValidationError
 
     # status and phase scores are optional for compatibility with legacy rows.
     if "status" in data and data["status"] is not None:
-        errors.extend(_validate_int(data["status"], f"{path}.status", required=False, min_value=0))
+        errors.extend(
+            _validate_int(data["status"], f"{path}.status", required=False, min_value=0)
+        )
         if isinstance(data["status"], int) and not isinstance(data["status"], bool):
             if data["status"] > 3:
-                errors.append(ValidationError(f"{path}.status", "value must be <= 3", data["status"]))
+                errors.append(
+                    ValidationError(
+                        f"{path}.status", "value must be <= 3", data["status"]
+                    )
+                )
 
     if "phase_scores" in data and data["phase_scores"] is not None:
         scores = data["phase_scores"]
         if not isinstance(scores, dict):
             errors.append(
-                ValidationError(f"{path}.phase_scores", f"expected object, got {type(scores).__name__}", scores)
+                ValidationError(
+                    f"{path}.phase_scores",
+                    f"expected object, got {type(scores).__name__}",
+                    scores,
+                )
             )
         else:
             allowed_phases = {"1", "2", "3", "4", "7", "8"}
             for phase, score in scores.items():
                 score_path = f"{path}.phase_scores.{phase}"
                 if phase not in allowed_phases:
-                    errors.append(ValidationError(score_path, "unknown phase", phase))
+                    errors.append(
+                        ValidationError(score_path, "unknown phase", phase)
+                    )
                 if score is not None and (
                     not isinstance(score, (int, float))
                     or isinstance(score, bool)
                     or not 0 <= score <= 100
                 ):
                     errors.append(
-                        ValidationError(score_path, "score must be between 0 and 100 or null", score)
+                        ValidationError(
+                            score_path, "score must be between 0 and 100 or null", score
+                        )
                     )
 
     # invalidation_reason (optional string)
