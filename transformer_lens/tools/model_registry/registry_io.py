@@ -291,6 +291,8 @@ def add_verification_record(
     notes: Optional[str] = None,
     verified_by: str = "verify_models",
     sanitize_fn: Optional[Callable[[Optional[str]], Optional[str]]] = None,
+    status: Optional[int] = None,
+    phase_scores: Optional[dict[int, Optional[float]]] = None,
 ) -> None:
     """Append a VerificationRecord to verification_history.json.
 
@@ -314,6 +316,8 @@ def add_verification_record(
         verified_by=verified_by,
         transformerlens_version=_get_tl_version(),
         notes=notes,
+        status=status,
+        phase_scores=phase_scores,
     )
 
     history = load_verification_history()
