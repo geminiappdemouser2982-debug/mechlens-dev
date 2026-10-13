@@ -411,6 +411,16 @@ def _validate_verification_record(data: dict, path: str) -> list[ValidationError
                     )
                 )
 
+    if "result" in data and data["result"] is not None:
+        if data["result"] not in ("passed", "failed"):
+            errors.append(
+                ValidationError(
+                    f"{path}.result",
+                    "expected 'passed' or 'failed'",
+                    data["result"],
+                )
+            )
+
     if "phase_scores" in data and data["phase_scores"] is not None:
         scores = data["phase_scores"]
         if not isinstance(scores, dict):
