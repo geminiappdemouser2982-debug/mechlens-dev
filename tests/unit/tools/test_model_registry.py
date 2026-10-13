@@ -349,6 +349,162 @@ class TestVerificationHistory:
             "old-failed/model"
         )
 
+    @pytest.mark.parametrize(
+        ("result", "status", "notes", "expected"),
+        [
+            ("passed", 3, "Below threshold: P1 failed", True),
+            ("failed", 1, "Benchmark passed", False),
+        ],
+    )
+    def test_explicit_result_controls_verification(self, result, status, notes, expected):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        record = VerificationRecord(
+            model_id="gpt2",
+            verified_date=date(2026, 1, 1),
+            status=status,
+            notes=notes,
+            result=result,
+        )
+        assert VerificationHistory(records=[record]).is_verified("gpt2") is expected
+
+    @pytest.mark.parametrize(
+        ("attempts", "expected"),
+        [
+            (["passed", "failed"], False),
+            (["failed", "passed"], True),
+        ],
+    )
+    def test_same_day_latest_attempt_decides_status(self, attempts, expected):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        history = VerificationHistory(
+            records=[
+                VerificationRecord(
+                    model_id="gpt2",
+                    verified_date=date(2026, 2, 1),
+                    result=result,
+                )
+                for result in attempts
+            ]
+        )
+        assert history.is_verified("gpt2") is expected
+
+    @pytest.mark.parametrize(
+        ("eligible_result", "invalidated_result", "expected"),
+        [
+            ("passed", "failed", True),
+            ("failed", "passed", False),
+        ],
+    )
+    def test_invalidated_attempt_does_not_override_eligible_attempt(
+        self, eligible_result, invalidated_result, expected
+    ):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        history = VerificationHistory(
+            records=[
+                VerificationRecord(
+                    model_id="gpt2",
+                    verified_date=date(2026, 2, 1),
+                    result=eligible_result,
+                ),
+                VerificationRecord(
+                    model_id="gpt2",
+                    verified_date=date(2026, 2, 1),
+                    result=invalidated_result,
+                    invalidated=True,
+                ),
+            ]
+        )
+        assert history.is_verified("gpt2") is expected
+
+    def test_all_invalidated_attempts_leave_no_eligible_status(self):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        history = VerificationHistory(
+            records=[
+                VerificationRecord(
+                    model_id="gpt2",
+                    verified_date=date(2026, 2, 1),
+                    result=result,
+                    invalidated=True,
+                )
+                for result in ("passed", "failed")
+            ]
+        )
+        assert history.get_record("gpt2") is None
+        assert not history.is_verified("gpt2")
+
+    @pytest.mark.parametrize(
+        ("notes", "expected"),
+        [
+            ("Benchmark passed", True),
+            ("Benchmark passed with issues: P3=88.2% (failed: weight checks)", True),
+            ("Full verification completed with issues: P2=92.3% (failed: gated_hooks_fire)", True),
+            ("Core verification completed", True),
+            ("Below threshold: P1=0.0% < 100.0%", False),
+            ("Below 50.0% threshold: P1=0.0%", False),
+            ("Process crash during benchmark (likely OOM)", False),
+            ("Worker timed out after 900s", False),
+            ("CUDA error: device-side assert triggered", False),
+        ],
+    )
+    def test_legacy_notes_infer_outcome_without_rewriting_record(self, notes, expected):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        record = VerificationRecord(
+            model_id="legacy/model",
+            verified_date=date(2026, 2, 1),
+            notes=notes,
+        )
+        original = record.to_dict()
+        assert VerificationHistory(records=[record]).is_verified("legacy/model") is expected
+        assert record.to_dict() == original
+        assert "result" not in record.to_dict()
+
+    def test_legacy_unrecognized_note_preserves_existence_fallback(self):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        record = VerificationRecord(
+            model_id="legacy/model",
+            verified_date=date(2026, 2, 1),
+            notes="Historical annotation with no outcome wording",
+        )
+        assert VerificationHistory(records=[record]).is_verified("legacy/model")
+
+    def test_status_only_legacy_record_precedes_note_inference(self):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        record = VerificationRecord(
+            model_id="legacy/model",
+            verified_date=date(2026, 2, 1),
+            status=3,
+            notes="Benchmark passed",
+        )
+        assert not VerificationHistory(records=[record]).is_verified("legacy/model")
+
     def test_get_record_returns_most_recent_non_invalidated_attempt(self):
         from transformer_lens.tools.model_registry.verification import (
             VerificationHistory,
