@@ -301,6 +301,7 @@ class TestVerificationHistory:
                 model_id="gpt2",
                 verified_date=date(2026, 1, 1),
                 status=1,
+                result="passed",
             )
         )
         history.add_record(
@@ -309,6 +310,7 @@ class TestVerificationHistory:
                 verified_date=date(2026, 2, 1),
                 status=3,
                 phase_scores={1: 0.0},
+                result="failed",
             )
         )
 
@@ -334,6 +336,18 @@ class TestVerificationHistory:
         assert history.is_verified("gpt2")
         assert "status" not in legacy.to_dict()
         assert "phase_scores" not in legacy.to_dict()
+        assert "result" not in legacy.to_dict()
+
+        transitional = VerificationRecord.from_dict(
+            {
+                "model_id": "old-failed/model",
+                "verified_date": "2026-01-01",
+                "status": 3,
+            }
+        )
+        assert not VerificationHistory(records=[transitional]).is_verified(
+            "old-failed/model"
+        )
 
     def test_get_record_returns_most_recent_non_invalidated_attempt(self):
         from transformer_lens.tools.model_registry.verification import (
@@ -532,12 +546,19 @@ class TestValidate:
         path = registry_data_dir / "verification_history.json"
         data = json.loads(path.read_text())
         data["records"][0]["status"] = 3
+        data["records"][0]["result"] = "failed"
         data["records"][0]["phase_scores"] = {"1": 0.0, "2": None}
         path.write_text(json.dumps(data, indent=2))
 
         result = validate_json_schema(path, "verification_history")
         assert result.valid
 
+        data["records"][0]["result"] = "unknown"
+        path.write_text(json.dumps(data, indent=2))
+        result = validate_json_schema(path, "verification_history")
+        assert not result.valid
+
+        data["records"][0]["result"] = "failed"
         data["records"][0]["status"] = 4
         path.write_text(json.dumps(data, indent=2))
         result = validate_json_schema(path, "verification_history")
@@ -682,6 +703,7 @@ class TestRegistryIO:
             verified_by="unit_test",
             status=3,
             phase_scores={1: 0.0, 2: None},
+            result="failed",
         )
 
         with open(registry_data_dir / "verification_history.json") as f:
@@ -691,6 +713,7 @@ class TestRegistryIO:
         assert data["records"][-1]["verified_by"] == "unit_test"
         assert data["records"][-1]["status"] == 3
         assert data["records"][-1]["phase_scores"] == {"1": 0.0, "2": None}
+        assert data["records"][-1]["result"] == "failed"
 
     def test_update_model_status_with_sanitize(self, registry_data_dir, monkeypatch):
         from transformer_lens.tools.model_registry import registry_io
