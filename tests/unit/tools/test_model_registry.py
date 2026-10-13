@@ -289,6 +289,43 @@ class TestVerificationHistory:
         history.add_record(record)
         assert history.is_verified("gpt2")
 
+    def test_failed_attempt_is_not_verified(self):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        history = VerificationHistory()
+        history.add_record(
+            VerificationRecord(
+                model_id="gpt2",
+                verified_date=date(2026, 2, 1),
+                status=3,
+                phase_scores={1: 0.0},
+            )
+        )
+
+        assert history.get_record("gpt2").status == 3
+        assert not history.is_verified("gpt2")
+
+    def test_legacy_record_remains_verified_without_new_fields(self):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        legacy = VerificationRecord.from_dict(
+            {
+                "model_id": "gpt2",
+                "verified_date": "2026-01-01",
+            }
+        )
+        history = VerificationHistory(records=[legacy])
+
+        assert history.is_verified("gpt2")
+        assert "status" not in legacy.to_dict()
+        assert "phase_scores" not in legacy.to_dict()
+
     def test_get_record_returns_most_recent_valid(self):
         from transformer_lens.tools.model_registry.verification import (
             VerificationHistory,
@@ -617,6 +654,8 @@ class TestRegistryIO:
             arch_id="GPT2LMHeadModel",
             notes="Test verification",
             verified_by="unit_test",
+            status=3,
+            phase_scores={1: 0.0, 2: None},
         )
 
         with open(registry_data_dir / "verification_history.json") as f:
@@ -624,6 +663,8 @@ class TestRegistryIO:
         assert len(data["records"]) == 2  # was 1, now 2
         assert data["records"][-1]["model_id"] == "sshleifer/tiny-gpt2"
         assert data["records"][-1]["verified_by"] == "unit_test"
+        assert data["records"][-1]["status"] == 3
+        assert data["records"][-1]["phase_scores"] == {"1": 0.0, "2": None}
 
     def test_update_model_status_with_sanitize(self, registry_data_dir, monkeypatch):
         from transformer_lens.tools.model_registry import registry_io
