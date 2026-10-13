@@ -1892,6 +1892,7 @@ def update_model_registry(model_name: str, results: List[BenchmarkResult]) -> bo
         verified_by="main_benchmark",
         status=STATUS_VERIFIED,
         phase_scores=phase_scores,
+        result="passed",
     )
 
     print(
