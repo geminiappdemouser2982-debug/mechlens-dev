@@ -9,7 +9,7 @@ import json
 import logging
 from datetime import date
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Literal, Optional
 
 from .verification import VerificationHistory, VerificationRecord
 
@@ -291,6 +291,9 @@ def add_verification_record(
     notes: Optional[str] = None,
     verified_by: str = "verify_models",
     sanitize_fn: Optional[Callable[[Optional[str]], Optional[str]]] = None,
+    status: Optional[int] = None,
+    phase_scores: Optional[dict[int, Optional[float]]] = None,
+    result: Optional[Literal["passed", "failed"]] = None,
 ) -> None:
     """Append a VerificationRecord to verification_history.json.
 
@@ -302,6 +305,7 @@ def add_verification_record(
         arch_id: Architecture type
         notes: Optional verification notes
         verified_by: Who/what performed the verification
+        result: Explicit outcome for the attempt ("passed" or "failed")
         sanitize_fn: Optional callable to sanitize note strings
     """
     if sanitize_fn and notes:
@@ -314,6 +318,9 @@ def add_verification_record(
         verified_by=verified_by,
         transformerlens_version=_get_tl_version(),
         notes=notes,
+        status=status,
+        phase_scores=phase_scores,
+        result=result,
     )
 
     history = load_verification_history()

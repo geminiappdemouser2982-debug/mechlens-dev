@@ -6,7 +6,39 @@ have been verified to work with TransformerLens.
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Optional
+from typing import Literal, Optional
+
+
+def _legacy_result_from_notes(notes: Optional[str]) -> Optional[bool]:
+    """Infer an old attempt's outcome from note formats used by the runner.
+
+    Returns None for notes without a recognized outcome so callers can
+    preserve the historical existence-based behavior for records that carry no
+    usable outcome signal.
+    """
+    if not notes:
+        return None
+
+    note = notes.strip().casefold()
+    if note.startswith((
+        "benchmark passed",
+        "full verification completed",
+        "core verification completed",
+    )):
+        return True
+
+    if note.startswith((
+        "below threshold:",
+        "below ",  # Older records used e.g. "Below 50.0% threshold: ..."
+        "core failed:",
+        "core verification failed:",
+        "process crash during benchmark",
+        "worker timed out",
+        "cannot access local variable",
+        "cuda error:",
+    )):
+        return False
+    return None
 
 
 @dataclass
@@ -22,6 +54,9 @@ class VerificationRecord:
         notes: Optional notes about the verification
         invalidated: Whether this verification has been invalidated
         invalidation_reason: Reason for invalidation if applicable
+        status: Numeric registry status, or None for a legacy record
+        phase_scores: Per-phase scores, or None when unavailable
+        result: Explicit "passed" or "failed" outcome for new attempts
     """
 
     model_id: str
@@ -32,10 +67,14 @@ class VerificationRecord:
     notes: Optional[str] = None
     invalidated: bool = False
     invalidation_reason: Optional[str] = None
+    # Optional so historical records remain distinguishable as legacy records.
+    status: Optional[int] = None
+    phase_scores: Optional[dict[int, Optional[float]]] = None
+    result: Optional[Literal["passed", "failed"]] = None
 
     def to_dict(self) -> dict:
         """Convert to a JSON-serializable dictionary."""
-        return {
+        data = {
             "model_id": self.model_id,
             "architecture_id": self.architecture_id,
             "verified_date": self.verified_date.isoformat(),
@@ -45,6 +84,15 @@ class VerificationRecord:
             "invalidated": self.invalidated,
             "invalidation_reason": self.invalidation_reason,
         }
+        if self.status is not None:
+            data["status"] = self.status
+        if self.phase_scores is not None:
+            data["phase_scores"] = {
+                str(phase): score for phase, score in self.phase_scores.items()
+            }
+        if self.result is not None:
+            data["result"] = self.result
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> "VerificationRecord":
@@ -58,6 +106,13 @@ class VerificationRecord:
             notes=data.get("notes"),
             invalidated=data.get("invalidated", False),
             invalidation_reason=data.get("invalidation_reason"),
+            status=data.get("status"),
+            phase_scores=(
+                {int(phase): score for phase, score in data["phase_scores"].items()}
+                if data.get("phase_scores") is not None
+                else None
+            ),
+            result=data.get("result"),
         )
 
 
@@ -92,14 +147,15 @@ class VerificationHistory:
         )
 
     def get_record(self, model_id: str) -> Optional[VerificationRecord]:
-        """Get the most recent valid verification record for a model.
+        """Get the latest non-invalidated verification attempt for a model.
 
-        Args:
-            model_id: The model ID to look up
-
-        Returns:
-            The verification record, or None if not found or invalidated
+        Legacy records without a status are returned as before. New records may
+        represent either a successful or failed attempt. Records are appended
+        in attempt order, so list order breaks ties when multiple attempts have
+        the same verified_date (which stores only a calendar date).
         """
+        # Walk backward so later same-day attempts take precedence, while
+        # skipping invalidated attempts to find the latest eligible record.
         for record in reversed(self.records):
             if record.model_id == model_id and not record.invalidated:
                 return record
@@ -114,7 +170,27 @@ class VerificationHistory:
         Returns:
             True if the model has a valid (non-invalidated) verification
         """
-        return self.get_record(model_id) is not None
+        record = self.get_record(model_id)
+        if record is None:
+            return False
+        if record.result is not None:
+            return record.result == "passed"
+        # Some transitional rows already have a numeric status. Trust it before
+        # interpreting legacy notes, which may contain incidental words such
+        # as "failed" while describing a successful run with tolerated issues.
+        if record.status is not None:
+            return record.status == 1
+
+        # Older history predates both explicit results and numeric statuses.
+        # Its runner notes have stable success/failure prefixes; infer those
+        # without migrating or rewriting the saved records.
+        inferred_result = _legacy_result_from_notes(record.notes)
+        if inferred_result is not None:
+            return inferred_result
+
+        # Keep the former existence-based behavior for legacy rows without a
+        # recognized outcome note.
+        return True
 
     def add_record(self, record: VerificationRecord) -> None:
         """Add a new verification record.

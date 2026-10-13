@@ -289,7 +289,323 @@ class TestVerificationHistory:
         history.add_record(record)
         assert history.is_verified("gpt2")
 
-    def test_get_record_returns_most_recent_valid(self):
+    @pytest.mark.parametrize(
+        ("result", "status"),
+        [("passed", 1), ("failed", 3)],
+    )
+    def test_result_round_trip(self, result, status):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        history = VerificationHistory(
+            records=[
+                VerificationRecord(
+                    model_id="gpt2",
+                    verified_date=date(2026, 1, 1),
+                    status=status,
+                    phase_scores={1: 100.0 if result == "passed" else 0.0},
+                    result=result,
+                )
+            ]
+        )
+        restored = VerificationHistory.from_dict(json.loads(json.dumps(history.to_dict())))
+        record = restored.get_record("gpt2")
+        assert record is not None
+        assert record.result == result
+        assert restored.is_verified("gpt2") is (result == "passed")
+
+    def test_failed_attempt_is_not_verified(self):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        history = VerificationHistory()
+        history.add_record(
+            VerificationRecord(
+                model_id="gpt2",
+                verified_date=date(2026, 1, 1),
+                status=1,
+                result="passed",
+            )
+        )
+        history.add_record(
+            VerificationRecord(
+                model_id="gpt2",
+                verified_date=date(2026, 2, 1),
+                status=3,
+                phase_scores={1: 0.0},
+                result="failed",
+            )
+        )
+
+        record = history.get_record("gpt2")
+        assert record is not None
+        assert record.status == 3
+        assert not history.is_verified("gpt2")
+
+    def test_legacy_record_remains_verified_without_new_fields(self):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        legacy = VerificationRecord.from_dict(
+            {
+                "model_id": "gpt2",
+                "verified_date": "2026-01-01",
+            }
+        )
+        history = VerificationHistory(records=[legacy])
+
+        assert history.is_verified("gpt2")
+        assert "status" not in legacy.to_dict()
+        assert "phase_scores" not in legacy.to_dict()
+        assert "result" not in legacy.to_dict()
+
+        transitional = VerificationRecord.from_dict(
+            {
+                "model_id": "old-failed/model",
+                "verified_date": "2026-01-01",
+                "status": 3,
+            }
+        )
+        assert not VerificationHistory(records=[transitional]).is_verified(
+            "old-failed/model"
+        )
+
+    @pytest.mark.parametrize(
+        ("result", "status", "notes", "expected"),
+        [
+            ("passed", 3, "Below threshold: P1 failed", True),
+            ("failed", 1, "Benchmark passed", False),
+        ],
+    )
+    def test_explicit_result_controls_verification(self, result, status, notes, expected):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        record = VerificationRecord(
+            model_id="gpt2",
+            verified_date=date(2026, 1, 1),
+            status=status,
+            notes=notes,
+            result=result,
+        )
+        assert VerificationHistory(records=[record]).is_verified("gpt2") is expected
+
+    @pytest.mark.parametrize(
+        ("attempts", "expected"),
+        [
+            (["passed", "failed"], False),
+            (["failed", "passed"], True),
+        ],
+    )
+    def test_same_day_latest_attempt_decides_status(self, attempts, expected):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        history = VerificationHistory(
+            records=[
+                VerificationRecord(
+                    model_id="gpt2",
+                    verified_date=date(2026, 2, 1),
+                    result=result,
+                )
+                for result in attempts
+            ]
+        )
+        assert history.is_verified("gpt2") is expected
+
+    @pytest.mark.parametrize(
+        ("eligible_result", "invalidated_result", "expected"),
+        [
+            ("passed", "failed", True),
+            ("failed", "passed", False),
+        ],
+    )
+    def test_invalidated_attempt_does_not_override_eligible_attempt(
+        self, eligible_result, invalidated_result, expected
+    ):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        history = VerificationHistory(
+            records=[
+                VerificationRecord(
+                    model_id="gpt2",
+                    verified_date=date(2026, 2, 1),
+                    result=eligible_result,
+                ),
+                VerificationRecord(
+                    model_id="gpt2",
+                    verified_date=date(2026, 2, 1),
+                    result=invalidated_result,
+                    invalidated=True,
+                ),
+            ]
+        )
+        assert history.is_verified("gpt2") is expected
+
+    def test_all_invalidated_attempts_leave_no_eligible_status(self):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        history = VerificationHistory(
+            records=[
+                VerificationRecord(
+                    model_id="gpt2",
+                    verified_date=date(2026, 2, 1),
+                    result=result,
+                    invalidated=True,
+                )
+                for result in ("passed", "failed")
+            ]
+        )
+        assert history.get_record("gpt2") is None
+        assert not history.is_verified("gpt2")
+
+    @pytest.mark.parametrize(
+        ("notes", "expected"),
+        [
+            ("Benchmark passed", True),
+            ("Benchmark passed with issues: P3=88.2% (failed: weight checks)", True),
+            ("Full verification completed with issues: P2=92.3% (failed: gated_hooks_fire)", True),
+            ("Core verification completed", True),
+            ("Below threshold: P1=0.0% < 100.0%", False),
+            ("Below 50.0% threshold: P1=0.0%", False),
+            ("Process crash during benchmark (likely OOM)", False),
+            ("Worker timed out after 900s", False),
+            ("CUDA error: device-side assert triggered", False),
+        ],
+    )
+    def test_legacy_notes_infer_outcome_without_rewriting_record(self, notes, expected):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        record = VerificationRecord(
+            model_id="legacy/model",
+            verified_date=date(2026, 2, 1),
+            notes=notes,
+        )
+        original = record.to_dict()
+        assert VerificationHistory(records=[record]).is_verified("legacy/model") is expected
+        assert record.to_dict() == original
+        assert "result" not in record.to_dict()
+
+    def test_legacy_unrecognized_note_preserves_existence_fallback(self):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        record = VerificationRecord(
+            model_id="legacy/model",
+            verified_date=date(2026, 2, 1),
+            notes="Historical annotation with no outcome wording",
+        )
+        assert VerificationHistory(records=[record]).is_verified("legacy/model")
+
+    def test_status_only_legacy_record_precedes_note_inference(self):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        record = VerificationRecord(
+            model_id="legacy/model",
+            verified_date=date(2026, 2, 1),
+            status=3,
+            notes="Benchmark passed",
+        )
+        assert not VerificationHistory(records=[record]).is_verified("legacy/model")
+
+    @pytest.mark.parametrize(
+        ("score_error", "expected_result"),
+        [(None, "passed"), ("synthetic benchmark failure", "failed")],
+    )
+    def test_partial_runner_records_actual_attempt_result(
+        self, tmp_path, monkeypatch, score_error, expected_result
+    ):
+        import sys
+        from types import ModuleType
+
+        from transformer_lens.tools.model_registry import registry_io
+        from transformer_lens.tools.model_registry import verify_models as runner
+
+        model_id = f"synthetic/{expected_result}"
+        arch_id = "SyntheticArch"
+        supported_path = tmp_path / "supported_models.json"
+        history_path = tmp_path / "verification_history.json"
+        supported_path.write_text(
+            json.dumps({
+                "models": [{
+                    "model_id": model_id,
+                    "architecture_id": arch_id,
+                    "status": 0,
+                    "verified_date": None,
+                    "note": None,
+                }],
+            })
+        )
+        history_path.write_text(json.dumps({"records": [], "last_updated": None}))
+        monkeypatch.setattr(registry_io, "_SUPPORTED_MODELS_PATH", supported_path)
+        monkeypatch.setattr(registry_io, "_VERIFICATION_HISTORY_PATH", history_path)
+
+        benchmark_module = ModuleType("transformer_lens.benchmarks.main_benchmark")
+        benchmark_module.run_benchmark_suite = lambda *args, **kwargs: []
+        monkeypatch.setitem(
+            sys.modules, "transformer_lens.benchmarks.main_benchmark", benchmark_module
+        )
+        loading_module = ModuleType("transformer_lens.loading_from_pretrained")
+        loading_module.NEED_REMOTE_CODE_MODELS = ()
+        monkeypatch.setitem(
+            sys.modules, "transformer_lens.loading_from_pretrained", loading_module
+        )
+        monkeypatch.setattr(runner, "estimate_model_params", lambda _model_id: 1)
+        monkeypatch.setattr(
+            runner, "estimate_benchmark_memory_gb", lambda *args, **kwargs: 0.1
+        )
+        monkeypatch.setattr(runner, "_extract_phase_scores", lambda _results: {1: 100.0})
+        monkeypatch.setattr(
+            runner, "_check_phase_scores", lambda _scores, _results: score_error
+        )
+        monkeypatch.setattr(runner, "_build_verified_note", lambda *_args: "synthetic pass")
+        monkeypatch.setattr(runner, "_save_checkpoint", lambda _progress: None)
+        monkeypatch.setattr(runner, "_interrupt_requested", False)
+        monkeypatch.setattr(runner, "classify_architecture", lambda _arch: "text")
+
+        progress = runner.verify_models(
+            [runner.ModelCandidate(model_id=model_id, architecture_id=arch_id)],
+            device="cpu",
+            max_memory_gb=1,
+            phases=[1],
+            quiet=True,
+        )
+
+        record = registry_io.load_verification_history().get_record(model_id)
+        assert record is not None
+        assert record.result == expected_result
+        if expected_result == "failed":
+            assert model_id in progress.failed
+            assert model_id not in progress.verified
+        else:
+            assert model_id in progress.verified
+            assert model_id not in progress.failed
+
+    def test_get_record_returns_most_recent_non_invalidated_attempt(self):
         from transformer_lens.tools.model_registry.verification import (
             VerificationHistory,
             VerificationRecord,
@@ -480,6 +796,30 @@ class TestValidate:
         )
         assert result.valid
 
+    def test_validate_verification_history_result_fields(self, registry_data_dir):
+        from transformer_lens.tools.model_registry.validate import validate_json_schema
+
+        path = registry_data_dir / "verification_history.json"
+        data = json.loads(path.read_text())
+        data["records"][0]["status"] = 3
+        data["records"][0]["result"] = "failed"
+        data["records"][0]["phase_scores"] = {"1": 0.0, "2": None}
+        path.write_text(json.dumps(data, indent=2))
+
+        result = validate_json_schema(path, "verification_history")
+        assert result.valid
+
+        data["records"][0]["result"] = "unknown"
+        path.write_text(json.dumps(data, indent=2))
+        result = validate_json_schema(path, "verification_history")
+        assert not result.valid
+
+        data["records"][0]["result"] = "failed"
+        data["records"][0]["status"] = 4
+        path.write_text(json.dumps(data, indent=2))
+        result = validate_json_schema(path, "verification_history")
+        assert not result.valid
+
     def test_validate_invalid_missing_required_field(self):
         from transformer_lens.tools.model_registry.validate import (
             validate_supported_models_report,
@@ -603,7 +943,11 @@ class TestRegistryIO:
             data = json.load(f)
         assert data["total_models"] == 4
 
-    def test_add_verification_record(self, registry_data_dir, monkeypatch):
+    @pytest.mark.parametrize(
+        ("status", "result"),
+        [(1, "passed"), (3, "failed")],
+    )
+    def test_add_verification_record(self, registry_data_dir, monkeypatch, status, result):
         from transformer_lens.tools.model_registry import registry_io
 
         monkeypatch.setattr(
@@ -617,6 +961,9 @@ class TestRegistryIO:
             arch_id="GPT2LMHeadModel",
             notes="Test verification",
             verified_by="unit_test",
+            status=status,
+            phase_scores={1: 100.0 if result == "passed" else 0.0, 2: None},
+            result=result,
         )
 
         with open(registry_data_dir / "verification_history.json") as f:
@@ -624,6 +971,15 @@ class TestRegistryIO:
         assert len(data["records"]) == 2  # was 1, now 2
         assert data["records"][-1]["model_id"] == "sshleifer/tiny-gpt2"
         assert data["records"][-1]["verified_by"] == "unit_test"
+        assert data["records"][-1]["status"] == status
+        assert data["records"][-1]["phase_scores"] == {
+            "1": 100.0 if result == "passed" else 0.0,
+            "2": None,
+        }
+        assert data["records"][-1]["result"] == result
+
+        loaded = registry_io.load_verification_history()
+        assert loaded.get_record("sshleifer/tiny-gpt2").result == result
 
     def test_update_model_status_with_sanitize(self, registry_data_dir, monkeypatch):
         from transformer_lens.tools.model_registry import registry_io
