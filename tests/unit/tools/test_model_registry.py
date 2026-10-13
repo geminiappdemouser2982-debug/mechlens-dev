@@ -299,13 +299,22 @@ class TestVerificationHistory:
         history.add_record(
             VerificationRecord(
                 model_id="gpt2",
+                verified_date=date(2026, 1, 1),
+                status=1,
+            )
+        )
+        history.add_record(
+            VerificationRecord(
+                model_id="gpt2",
                 verified_date=date(2026, 2, 1),
                 status=3,
                 phase_scores={1: 0.0},
             )
         )
 
-        assert history.get_record("gpt2").status == 3
+        record = history.get_record("gpt2")
+        assert record is not None
+        assert record.status == 3
         assert not history.is_verified("gpt2")
 
     def test_legacy_record_remains_verified_without_new_fields(self):
