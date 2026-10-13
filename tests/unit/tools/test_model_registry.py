@@ -289,6 +289,33 @@ class TestVerificationHistory:
         history.add_record(record)
         assert history.is_verified("gpt2")
 
+    @pytest.mark.parametrize(
+        ("result", "status"),
+        [("passed", 1), ("failed", 3)],
+    )
+    def test_result_round_trip(self, result, status):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        history = VerificationHistory(
+            records=[
+                VerificationRecord(
+                    model_id="gpt2",
+                    verified_date=date(2026, 1, 1),
+                    status=status,
+                    phase_scores={1: 100.0 if result == "passed" else 0.0},
+                    result=result,
+                )
+            ]
+        )
+        restored = VerificationHistory.from_dict(json.loads(json.dumps(history.to_dict())))
+        record = restored.get_record("gpt2")
+        assert record is not None
+        assert record.result == result
+        assert restored.is_verified("gpt2") is (result == "passed")
+
     def test_failed_attempt_is_not_verified(self):
         from transformer_lens.tools.model_registry.verification import (
             VerificationHistory,
@@ -504,6 +531,79 @@ class TestVerificationHistory:
             notes="Benchmark passed",
         )
         assert not VerificationHistory(records=[record]).is_verified("legacy/model")
+
+    @pytest.mark.parametrize(
+        ("score_error", "expected_result"),
+        [(None, "passed"), ("synthetic benchmark failure", "failed")],
+    )
+    def test_partial_runner_records_actual_attempt_result(
+        self, tmp_path, monkeypatch, score_error, expected_result
+    ):
+        import sys
+        from types import ModuleType
+
+        from transformer_lens.tools.model_registry import registry_io
+        from transformer_lens.tools.model_registry import verify_models as runner
+
+        model_id = f"synthetic/{expected_result}"
+        arch_id = "SyntheticArch"
+        supported_path = tmp_path / "supported_models.json"
+        history_path = tmp_path / "verification_history.json"
+        supported_path.write_text(
+            json.dumps({
+                "models": [{
+                    "model_id": model_id,
+                    "architecture_id": arch_id,
+                    "status": 0,
+                    "verified_date": None,
+                    "note": None,
+                }],
+            })
+        )
+        history_path.write_text(json.dumps({"records": [], "last_updated": None}))
+        monkeypatch.setattr(registry_io, "_SUPPORTED_MODELS_PATH", supported_path)
+        monkeypatch.setattr(registry_io, "_VERIFICATION_HISTORY_PATH", history_path)
+
+        benchmark_module = ModuleType("transformer_lens.benchmarks.main_benchmark")
+        benchmark_module.run_benchmark_suite = lambda *args, **kwargs: []
+        monkeypatch.setitem(
+            sys.modules, "transformer_lens.benchmarks.main_benchmark", benchmark_module
+        )
+        loading_module = ModuleType("transformer_lens.loading_from_pretrained")
+        loading_module.NEED_REMOTE_CODE_MODELS = ()
+        monkeypatch.setitem(
+            sys.modules, "transformer_lens.loading_from_pretrained", loading_module
+        )
+        monkeypatch.setattr(runner, "estimate_model_params", lambda _model_id: 1)
+        monkeypatch.setattr(
+            runner, "estimate_benchmark_memory_gb", lambda *args, **kwargs: 0.1
+        )
+        monkeypatch.setattr(runner, "_extract_phase_scores", lambda _results: {1: 100.0})
+        monkeypatch.setattr(
+            runner, "_check_phase_scores", lambda _scores, _results: score_error
+        )
+        monkeypatch.setattr(runner, "_build_verified_note", lambda *_args: "synthetic pass")
+        monkeypatch.setattr(runner, "_save_checkpoint", lambda _progress: None)
+        monkeypatch.setattr(runner, "_interrupt_requested", False)
+        monkeypatch.setattr(runner, "classify_architecture", lambda _arch: "text")
+
+        progress = runner.verify_models(
+            [runner.ModelCandidate(model_id=model_id, architecture_id=arch_id)],
+            device="cpu",
+            max_memory_gb=1,
+            phases=[1],
+            quiet=True,
+        )
+
+        record = registry_io.load_verification_history().get_record(model_id)
+        assert record is not None
+        assert record.result == expected_result
+        if expected_result == "failed":
+            assert model_id in progress.failed
+            assert model_id not in progress.verified
+        else:
+            assert model_id in progress.verified
+            assert model_id not in progress.failed
 
     def test_get_record_returns_most_recent_non_invalidated_attempt(self):
         from transformer_lens.tools.model_registry.verification import (
@@ -843,7 +943,11 @@ class TestRegistryIO:
             data = json.load(f)
         assert data["total_models"] == 4
 
-    def test_add_verification_record(self, registry_data_dir, monkeypatch):
+    @pytest.mark.parametrize(
+        ("status", "result"),
+        [(1, "passed"), (3, "failed")],
+    )
+    def test_add_verification_record(self, registry_data_dir, monkeypatch, status, result):
         from transformer_lens.tools.model_registry import registry_io
 
         monkeypatch.setattr(
@@ -857,9 +961,9 @@ class TestRegistryIO:
             arch_id="GPT2LMHeadModel",
             notes="Test verification",
             verified_by="unit_test",
-            status=3,
-            phase_scores={1: 0.0, 2: None},
-            result="failed",
+            status=status,
+            phase_scores={1: 100.0 if result == "passed" else 0.0, 2: None},
+            result=result,
         )
 
         with open(registry_data_dir / "verification_history.json") as f:
@@ -867,9 +971,15 @@ class TestRegistryIO:
         assert len(data["records"]) == 2  # was 1, now 2
         assert data["records"][-1]["model_id"] == "sshleifer/tiny-gpt2"
         assert data["records"][-1]["verified_by"] == "unit_test"
-        assert data["records"][-1]["status"] == 3
-        assert data["records"][-1]["phase_scores"] == {"1": 0.0, "2": None}
-        assert data["records"][-1]["result"] == "failed"
+        assert data["records"][-1]["status"] == status
+        assert data["records"][-1]["phase_scores"] == {
+            "1": 100.0 if result == "passed" else 0.0,
+            "2": None,
+        }
+        assert data["records"][-1]["result"] == result
+
+        loaded = registry_io.load_verification_history()
+        assert loaded.get_record("sshleifer/tiny-gpt2").result == result
 
     def test_update_model_status_with_sanitize(self, registry_data_dir, monkeypatch):
         from transformer_lens.tools.model_registry import registry_io
