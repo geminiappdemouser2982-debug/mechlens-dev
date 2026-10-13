@@ -6,7 +6,7 @@ have been verified to work with TransformerLens.
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Optional
+from typing import Literal, Optional
 
 
 @dataclass
@@ -22,8 +22,9 @@ class VerificationRecord:
         notes: Optional notes about the verification
         invalidated: Whether this verification has been invalidated
         invalidation_reason: Reason for invalidation if applicable
-        status: Verification result status, or None for a legacy record
+        status: Numeric registry status, or None for a legacy record
         phase_scores: Per-phase scores, or None when unavailable
+        result: Explicit "passed" or "failed" outcome for new attempts
     """
 
     model_id: str
@@ -37,6 +38,7 @@ class VerificationRecord:
     # Optional so historical records remain distinguishable as legacy records.
     status: Optional[int] = None
     phase_scores: Optional[dict[int, Optional[float]]] = None
+    result: Optional[Literal["passed", "failed"]] = None
 
     def to_dict(self) -> dict:
         """Convert to a JSON-serializable dictionary."""
@@ -56,6 +58,8 @@ class VerificationRecord:
             data["phase_scores"] = {
                 str(phase): score for phase, score in self.phase_scores.items()
             }
+        if self.result is not None:
+            data["result"] = self.result
         return data
 
     @classmethod
@@ -76,6 +80,7 @@ class VerificationRecord:
                 if data.get("phase_scores") is not None
                 else None
             ),
+            result=data.get("result"),
         )
 
 
@@ -130,9 +135,14 @@ class VerificationHistory:
             True if the model has a valid (non-invalidated) verification
         """
         record = self.get_record(model_id)
-        # Records written before result statuses were introduced represented
-        # successful verifications, so preserve their historical behavior.
-        return record is not None and record.status in (None, 1)
+        if record is None:
+            return False
+        if record.result is not None:
+            return record.result == "passed"
+        # Legacy records have no explicit result. Preserve their old lookup
+        # behavior, falling back to numeric status where the transitional
+        # schema already stored one.
+        return record.status in (None, 1)
 
     def add_record(self, record: VerificationRecord) -> None:
         """Add a new verification record.
