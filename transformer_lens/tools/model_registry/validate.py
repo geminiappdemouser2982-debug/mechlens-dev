@@ -375,6 +375,16 @@ def _validate_verification_record(data: dict, path: str) -> list[ValidationError
             _validate_string(data["architecture_id"], f"{path}.architecture_id", required=False)
         )
 
+    # result (optional "passed"/"failed"; absent/None on legacy records)
+    if data.get("result") is not None:
+        errors.extend(_validate_string(data["result"], f"{path}.result", required=False))
+        if isinstance(data["result"], str) and data["result"] not in ("passed", "failed"):
+            errors.append(
+                ValidationError(
+                    f"{path}.result", "value must be 'passed' or 'failed'", data["result"]
+                )
+            )
+
     # verified_date (required date string)
     errors.extend(_validate_date_string(data.get("verified_date"), f"{path}.verified_date"))
 

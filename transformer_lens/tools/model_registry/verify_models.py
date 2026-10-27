@@ -49,9 +49,9 @@ from .registry_io import (
     STATUS_SKIPPED,
     STATUS_UNVERIFIED,
     STATUS_VERIFIED,
-    add_verification_record,
     is_incompatible_quantized,
     load_supported_models_raw,
+    record_verification_result,
     required_quant_library_for_model,
     update_model_status,
 )
@@ -1059,13 +1059,20 @@ def verify_models(
                     if not quiet:
                         print(f"  {partial_note}")
 
-                update_model_status(
-                    model_id,
-                    arch,
-                    status=partial_status,
-                    phase_scores=filtered_scores,
-                    note=partial_note,
-                )
+                if partial_status is None:
+                    # Score-only backfill: status and note are untouched.
+                    update_model_status(model_id, arch, phase_scores=filtered_scores)
+                else:
+                    # Core verification changes the model's status, so it is an
+                    # outcome that belongs in the history audit trail too.
+                    record_verification_result(
+                        model_id,
+                        arch,
+                        status=partial_status,
+                        note=partial_note,
+                        phase_scores=filtered_scores,
+                        sanitize_fn=_sanitize_note,
+                    )
                 if partial_status == STATUS_FAILED:
                     progress.failed.append(model_id)
                 else:
@@ -1082,17 +1089,12 @@ def verify_models(
                     f"P4={phase_scores.get(4)}%, P7={phase_scores.get(7)}%, "
                     f"P8={phase_scores.get(8)}%"
                 )
-            update_model_status(
+            record_verification_result(
                 model_id,
                 arch,
-                STATUS_VERIFIED,
-                phase_scores=phase_scores,
+                status=STATUS_VERIFIED,
                 note=note,
-            )
-            add_verification_record(
-                model_id,
-                arch,
-                notes=note,
+                phase_scores=phase_scores,
             )
             progress.verified.append(model_id)
         else:
@@ -1105,18 +1107,12 @@ def verify_models(
                         f"P4={phase_scores.get(4)}%, P7={phase_scores.get(7)}%, "
                         f"P8={phase_scores.get(8)}%"
                     )
-            update_model_status(
+            record_verification_result(
                 model_id,
                 arch,
-                STATUS_FAILED,
+                status=STATUS_FAILED,
                 note=note,
                 phase_scores=phase_scores,
-                sanitize_fn=_sanitize_note,
-            )
-            add_verification_record(
-                model_id,
-                arch,
-                notes=note,
                 sanitize_fn=_sanitize_note,
             )
             progress.failed.append(model_id)

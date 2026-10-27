@@ -5,7 +5,8 @@ Tests cover:
 - verification.py: add_record, invalidate, is_verified, get_record
 - api.py: get_supported_models, is_model_supported, get_registry_stats
 - validate.py: validate_json_schema with valid and invalid data
-- registry_io.py: update_model_status, add_verification_record
+- registry_io.py: update_model_status, add_verification_record, record_verification_result
+- history_sync.py: audit_history (read-only) on fixture and committed data
 - alias_drift.py: check_drift, DriftReport
 - verify_models.py: _sanitize_note
 """
@@ -362,6 +363,126 @@ class TestVerificationHistory:
         assert len(restored.records) == 1
         assert restored.records[0].model_id == "gpt2"
 
+    def test_result_round_trip_and_legacy_default(self):
+        from transformer_lens.tools.model_registry.verification import (
+            RESULT_FAILED,
+            VerificationRecord,
+        )
+
+        record = VerificationRecord(
+            model_id="gpt2", verified_date=date(2026, 1, 1), result=RESULT_FAILED
+        )
+        d = record.to_dict()
+        assert d["result"] == "failed"
+        assert "status" not in d
+        restored = VerificationRecord.from_dict(d)
+        assert restored.result == RESULT_FAILED
+        assert restored.effective_result == RESULT_FAILED
+        assert not restored.is_pass
+
+        # Records written before the field existed load with result=None.
+        legacy = VerificationRecord.from_dict(
+            {"model_id": "gpt2", "verified_date": "2026-01-01", "notes": "Benchmark passed"}
+        )
+        assert legacy.result is None
+        assert legacy.effective_result == "passed"
+        assert legacy.is_pass
+
+    def test_result_rejects_other_values(self):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationRecord,
+        )
+
+        with pytest.raises(ValueError):
+            VerificationRecord(model_id="gpt2", verified_date=date(2026, 1, 1), result="ok")
+
+    @pytest.mark.parametrize(
+        "notes, expected",
+        [
+            (None, "passed"),
+            ("Benchmark passed", "passed"),
+            ("Full verification completed with issues: P2=80.0%", "passed"),
+            ("Core verification completed", "passed"),
+            ("Below threshold: P1=50.0% < 100.0% (failed: forward_pass_logits)", "failed"),
+            ("Process crash during benchmark (likely OOM)", "failed"),
+            ("OOM during benchmark", "failed"),
+            ("CORE FAILED: P1=0.0% (failed: load_bridge_unprocessed)", "failed"),
+            ("CUDA error: device-side assert triggered", "failed"),
+            ("Worker timed out after 900s", "failed"),
+        ],
+    )
+    def test_infer_legacy_result(self, notes, expected):
+        from transformer_lens.tools.model_registry.verification import (
+            infer_legacy_result,
+        )
+
+        assert infer_legacy_result(notes) == expected
+
+    def test_status_result_mapping(self):
+        from transformer_lens.tools.model_registry.verification import (
+            STATUS_FAILED,
+            STATUS_SKIPPED,
+            STATUS_VERIFIED,
+            result_to_status,
+            status_to_result,
+        )
+
+        assert status_to_result(STATUS_VERIFIED) == "passed"
+        assert status_to_result(STATUS_FAILED) == "failed"
+        assert result_to_status("passed") == STATUS_VERIFIED
+        assert result_to_status("failed") == STATUS_FAILED
+        with pytest.raises(ValueError):
+            status_to_result(STATUS_SKIPPED)
+
+    def test_failed_record_is_not_verified(self):
+        from transformer_lens.tools.model_registry.verification import (
+            RESULT_FAILED,
+            RESULT_PASSED,
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        history = VerificationHistory()
+        history.add_record(
+            VerificationRecord(
+                model_id="gpt2", verified_date=date(2026, 1, 1), result=RESULT_PASSED
+            )
+        )
+        assert history.is_verified("gpt2")
+        # A later failure supersedes the earlier pass - the latest attempt wins.
+        history.add_record(
+            VerificationRecord(
+                model_id="gpt2",
+                verified_date=date(2026, 2, 1),
+                result=RESULT_FAILED,
+                notes="Below threshold",
+            )
+        )
+        latest = history.get_record("gpt2")
+        assert latest is not None and latest.result == RESULT_FAILED
+        assert not history.is_verified("gpt2")
+
+    def test_get_record_filters_by_architecture(self):
+        from transformer_lens.tools.model_registry.verification import (
+            RESULT_PASSED,
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        history = VerificationHistory()
+        history.add_record(
+            VerificationRecord(
+                model_id="org/m",
+                architecture_id="OldArch",
+                verified_date=date(2026, 1, 1),
+                result=RESULT_PASSED,
+            )
+        )
+        assert history.get_record("org/m") is not None
+        assert history.get_record("org/m", "OldArch") is not None
+        assert history.get_record("org/m", "NewArch") is None
+        assert not history.is_verified("org/m", "NewArch")
+
 
 # ============================================================
 # Test api.py (with fixture data dir)
@@ -648,6 +769,188 @@ class TestRegistryIO:
             data = json.load(f)
         entry = next(m for m in data["models"] if m["model_id"] == "openai-community/gpt2")
         assert entry["note"] == "SANITIZED"
+
+    def test_add_verification_record_stores_result(self, registry_data_dir, monkeypatch):
+        from transformer_lens.tools.model_registry import registry_io
+
+        monkeypatch.setattr(
+            registry_io,
+            "_VERIFICATION_HISTORY_PATH",
+            registry_data_dir / "verification_history.json",
+        )
+
+        registry_io.add_verification_record(
+            model_id="sshleifer/tiny-gpt2",
+            arch_id="GPT2LMHeadModel",
+            notes="Below threshold: P1=50.0%",
+            result="failed",
+        )
+
+        with open(registry_data_dir / "verification_history.json") as f:
+            data = json.load(f)
+        assert data["records"][-1]["result"] == "failed"
+        assert "status" not in data["records"][-1]
+        # Records written before the field existed are left untouched on save.
+        assert "result" not in data["records"][0]
+
+        with pytest.raises(ValueError):
+            registry_io.add_verification_record(
+                model_id="sshleifer/tiny-gpt2", arch_id="GPT2LMHeadModel", result="ok"
+            )
+
+    def _patch_paths(self, registry_io, registry_data_dir, monkeypatch):
+        monkeypatch.setattr(
+            registry_io,
+            "_SUPPORTED_MODELS_PATH",
+            registry_data_dir / "supported_models.json",
+        )
+        monkeypatch.setattr(
+            registry_io,
+            "_VERIFICATION_HISTORY_PATH",
+            registry_data_dir / "verification_history.json",
+        )
+
+    def test_record_verification_result_writes_both_files(self, registry_data_dir, monkeypatch):
+        from transformer_lens.tools.model_registry import registry_io
+
+        self._patch_paths(registry_io, registry_data_dir, monkeypatch)
+
+        ok = registry_io.record_verification_result(
+            "sshleifer/tiny-gpt2",
+            "GPT2LMHeadModel",
+            status=registry_io.STATUS_FAILED,
+            note="Below threshold: P1=50.0% hf_secrettoken12345678901",
+            phase_scores={1: 50.0},
+            sanitize_fn=lambda n: n.replace("hf_secrettoken12345678901", "HF_TOKEN") if n else n,
+        )
+        assert ok is True
+
+        with open(registry_data_dir / "supported_models.json") as f:
+            entry = next(
+                m for m in json.load(f)["models"] if m["model_id"] == "sshleifer/tiny-gpt2"
+            )
+        with open(registry_data_dir / "verification_history.json") as f:
+            record = json.load(f)["records"][-1]
+
+        assert entry["status"] == registry_io.STATUS_FAILED
+        assert entry["phase1_score"] == 50.0
+        assert record["model_id"] == "sshleifer/tiny-gpt2"
+        assert record["result"] == "failed"
+        assert record["notes"] == entry["note"] == "Below threshold: P1=50.0% HF_TOKEN"
+
+    def test_record_verification_result_skips_history_without_registry_entry(
+        self, registry_data_dir, monkeypatch
+    ):
+        from transformer_lens.tools.model_registry import registry_io
+
+        self._patch_paths(registry_io, registry_data_dir, monkeypatch)
+
+        ok = registry_io.record_verification_result(
+            "nonexistent/model",
+            "UnknownArch",
+            status=registry_io.STATUS_FAILED,
+            note="Below threshold",
+        )
+        assert ok is False
+        with open(registry_data_dir / "verification_history.json") as f:
+            assert len(json.load(f)["records"]) == 1  # unchanged
+
+    def test_record_verification_result_rejects_non_outcome_status(
+        self, registry_data_dir, monkeypatch
+    ):
+        from transformer_lens.tools.model_registry import registry_io
+
+        self._patch_paths(registry_io, registry_data_dir, monkeypatch)
+        with pytest.raises(ValueError):
+            registry_io.record_verification_result(
+                "openai-community/gpt2", "GPT2LMHeadModel", status=registry_io.STATUS_SKIPPED
+            )
+
+
+# ============================================================
+# Test history_sync.py
+# ============================================================
+
+
+class TestHistorySync:
+    def _load(self, registry_data_dir):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+        )
+
+        with open(registry_data_dir / "supported_models.json") as f:
+            models = json.load(f)["models"]
+        with open(registry_data_dir / "verification_history.json") as f:
+            history = VerificationHistory.from_dict(json.load(f))
+        return models, history
+
+    def test_audit_reports_missing_and_disagreement(self, registry_data_dir):
+        from transformer_lens.tools.model_registry.history_sync import audit_history
+        from transformer_lens.tools.model_registry.verification import (
+            STATUS_FAILED,
+            STATUS_VERIFIED,
+            VerificationRecord,
+        )
+
+        models, history = self._load(registry_data_dir)
+        # Fixture: gpt2 (verified, has a legacy pass record), Llama-2 (verified, no record).
+        # Add a failed record for Llama-2 at the wrong arch and an orphan.
+        history.add_record(
+            VerificationRecord(
+                model_id="meta-llama/Llama-2-7b-hf",
+                architecture_id="OtherArch",
+                verified_date=date(2026, 1, 2),
+                result="failed",
+            )
+        )
+        history.add_record(
+            VerificationRecord(
+                model_id="gone/model", verified_date=date(2026, 1, 2), result="passed"
+            )
+        )
+        models[1]["status"] = STATUS_FAILED  # tiny-gpt2 now failed, no history
+
+        report = audit_history(models, history)
+        assert not report.is_consistent
+        assert sorted(report.missing_history) == [
+            ("meta-llama/Llama-2-7b-hf", "LlamaForCausalLM"),
+            ("sshleifer/tiny-gpt2", "GPT2LMHeadModel"),
+        ]
+        assert report.status_disagreement == []
+        assert report.orphan_records == ["gone/model"]
+        assert report.legacy_records == 1
+
+        history.records[0].result = "failed"  # gpt2 history now contradicts registry
+        report = audit_history(models, history)
+        assert report.status_disagreement == [
+            ("openai-community/gpt2", "GPT2LMHeadModel", STATUS_VERIFIED, STATUS_FAILED)
+        ]
+
+    def test_audit_does_not_modify_inputs(self, registry_data_dir):
+        from transformer_lens.tools.model_registry.history_sync import audit_history
+
+        models, history = self._load(registry_data_dir)
+        before = (json.dumps(models), json.dumps(history.to_dict()))
+        audit_history(models, history)
+        assert (json.dumps(models), json.dumps(history.to_dict())) == before
+
+    def test_audit_runs_on_committed_data_files(self):
+        """The shipped files must load and audit cleanly; legacy records stay readable."""
+        from transformer_lens.tools.model_registry.history_sync import audit_history
+        from transformer_lens.tools.model_registry.registry_io import (
+            load_supported_models_raw,
+            load_verification_history,
+        )
+        from transformer_lens.tools.model_registry.verification import VALID_RESULTS
+
+        history = load_verification_history()
+        assert history.records, "committed history should not be empty"
+        # Records written before the result field existed must still resolve to an outcome.
+        assert all(r.effective_result in VALID_RESULTS for r in history.records)
+
+        report = audit_history(load_supported_models_raw()["models"], history)
+        assert report.legacy_records <= len(history.records)
+        assert isinstance(report.summary(), str)
 
 
 # ============================================================

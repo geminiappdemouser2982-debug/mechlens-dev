@@ -56,8 +56,9 @@ Read [the root AGENTS.md](../../../AGENTS.md) for project-wide rules. This file 
 | File | Role |
 |---|---|
 | `verify_models.py` | **Canonical CLI** for batch verification + registry updates |
-| `registry_io.py` | I/O for `supported_models.json`; `update_model_status()` is the only writer |
+| `registry_io.py` | I/O for both data files; `record_verification_result()` writes a pass/fail outcome to registry + history together |
 | `verification.py` | `VerificationRecord` / `VerificationHistory` dataclasses (audit-trail schema) |
+| `history_sync.py` | Read-only audit of `supported_models.json` against `verification_history.json` |
 | `validate.py` | JSON-schema validation for registry files |
 | `api.py` | Read-only programmatic access (`is_model_supported`, `get_architecture_models`, …) |
 | `schemas.py` | Dataclasses for model entries, scan info, architecture stats |
@@ -90,6 +91,13 @@ To verify a model not yet in `data/supported_models.json`, hand-add the entry fi
 `verify_models --model org/repo-name` then populates status/score/note via `update_model_status()`. Never set those fields manually.
 
 ---
+
+## `data/verification_history.json` (audit trail)
+
+Append-only log of every pass/fail outcome; `supported_models.json` holds only the latest status. Each new record carries `result: "passed"` or `"failed"`. Records without a `result` predate the field and are interpreted from their note (`infer_legacy_result`); they are never rewritten. `VerificationHistory.is_verified()` is true only when the model's **latest** non-invalidated record passed.
+
+- Pass/fail outcomes go through `record_verification_result()` so both files change together. Skips are registry-only.
+- Check consistency: `uv run python -m transformer_lens.tools.model_registry.history_sync` (`--verbose` lists mismatches). The tool is read-only; gaps from before result tracking are expected and left in place.
 
 ## `data/verification_checkpoint.json` (gitignored)
 

@@ -11,19 +11,23 @@ from datetime import date
 from pathlib import Path
 from typing import Callable, Optional
 
-from .verification import VerificationHistory, VerificationRecord
+from .verification import (  # noqa: F401 - status codes re-exported for callers
+    RESULT_PASSED,
+    STATUS_FAILED,
+    STATUS_SKIPPED,
+    STATUS_UNVERIFIED,
+    STATUS_VERIFIED,
+    VALID_RESULTS,
+    VerificationHistory,
+    VerificationRecord,
+    status_to_result,
+)
 
 logger = logging.getLogger(__name__)
 
 _DATA_DIR = Path(__file__).parent / "data"
 _SUPPORTED_MODELS_PATH = _DATA_DIR / "supported_models.json"
 _VERIFICATION_HISTORY_PATH = _DATA_DIR / "verification_history.json"
-
-# Status codes
-STATUS_UNVERIFIED = 0
-STATUS_VERIFIED = 1
-STATUS_SKIPPED = 2
-STATUS_FAILED = 3
 
 # HF-loadable quantization formats. Admitted to the registry; verification gates
 # on `required_quant_library_for_model()` at run time.
@@ -166,11 +170,19 @@ def save_verification_history(history: VerificationHistory) -> None:
 
 
 def _get_tl_version() -> Optional[str]:
-    """Get the current TransformerLens version, or None."""
+    """Get the installed TransformerLens version, or None."""
     try:
         import transformer_lens
 
-        return getattr(transformer_lens, "__version__", None)
+        version = getattr(transformer_lens, "__version__", None)
+        if version:
+            return str(version)
+    except Exception:
+        pass
+    try:
+        from importlib.metadata import version as _dist_version
+
+        return _dist_version("transformer-lens")
     except Exception:
         return None
 
@@ -291,19 +303,22 @@ def add_verification_record(
     notes: Optional[str] = None,
     verified_by: str = "verify_models",
     sanitize_fn: Optional[Callable[[Optional[str]], Optional[str]]] = None,
+    result: str = RESULT_PASSED,
 ) -> None:
     """Append a VerificationRecord to verification_history.json.
 
-    Uses the VerificationRecord dataclass properly instead of raw dict
-    manipulation.
-
     Args:
-        model_id: The verified model
+        model_id: The model that was tested
         arch_id: Architecture type
         notes: Optional verification notes
         verified_by: Who/what performed the verification
         sanitize_fn: Optional callable to sanitize note strings
+        result: ``"passed"`` or ``"failed"``. The history is an audit trail of
+            attempts, so failures are recorded too; the result is what lets readers
+            tell them apart.
     """
+    if result not in VALID_RESULTS:
+        raise ValueError(f"result must be one of {VALID_RESULTS}, got {result!r}")
     if sanitize_fn and notes:
         notes = sanitize_fn(notes)
 
@@ -314,8 +329,70 @@ def add_verification_record(
         verified_by=verified_by,
         transformerlens_version=_get_tl_version(),
         notes=notes,
+        result=result,
     )
 
     history = load_verification_history()
     history.add_record(record)
     save_verification_history(history)
+
+
+def record_verification_result(
+    model_id: str,
+    arch_id: str,
+    status: int,
+    note: Optional[str] = None,
+    phase_scores: Optional[dict[int, Optional[float]]] = None,
+    verified_by: str = "verify_models",
+    sanitize_fn: Optional[Callable[[Optional[str]], Optional[str]]] = None,
+) -> bool:
+    """Record a pass/fail verification outcome in both registry files.
+
+    This is the single write path for a completed verification: it updates the
+    model's entry in supported_models.json and appends a matching record to
+    verification_history.json so the two files cannot drift apart. The history
+    record is only written when the registry entry was actually updated; a failure
+    for a model that is not in the registry is logged and dropped rather than
+    leaving an orphan history record.
+
+    Args:
+        model_id: The model that was tested
+        arch_id: Architecture of the model
+        status: STATUS_VERIFIED or STATUS_FAILED
+        note: Note describing the outcome
+        phase_scores: Phase score dict to write to the registry entry
+        verified_by: Who/what performed the verification
+        sanitize_fn: Optional callable to sanitize note strings
+
+    Returns:
+        True if the registry entry was updated (and the history record written)
+    """
+    # Raises ValueError for anything other than VERIFIED / FAILED.
+    result = status_to_result(status)
+
+    updated = update_model_status(
+        model_id,
+        arch_id,
+        status=status,
+        note=note,
+        phase_scores=phase_scores,
+        sanitize_fn=sanitize_fn,
+    )
+    if not updated:
+        logger.warning(
+            "Not recording %s result for %s (%s): no registry entry to update",
+            result,
+            model_id,
+            arch_id,
+        )
+        return False
+
+    add_verification_record(
+        model_id,
+        arch_id,
+        notes=note,
+        verified_by=verified_by,
+        sanitize_fn=sanitize_fn,
+        result=result,
+    )
+    return True

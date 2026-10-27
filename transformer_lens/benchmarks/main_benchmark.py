@@ -1848,9 +1848,9 @@ def update_model_registry(model_name: str, results: List[BenchmarkResult]) -> bo
         True if registry was updated successfully
     """
     from transformer_lens.tools.model_registry.registry_io import (
+        STATUS_FAILED,
         STATUS_VERIFIED,
-        add_verification_record,
-        update_model_status,
+        record_verification_result,
     )
 
     # Calculate phase scores (percentage of passed tests per phase)
@@ -1878,17 +1878,23 @@ def update_model_registry(model_name: str, results: List[BenchmarkResult]) -> bo
     except Exception:
         pass
 
-    updated = update_model_status(
-        model_id=model_name,
-        arch_id=architecture_id,
-        status=STATUS_VERIFIED,
-        phase_scores=phase_scores,
-    )
+    # A failed test is a failed verification; never record it as a pass.
+    failed_names = [
+        r.name for r in results if not r.passed and r.severity != BenchmarkSeverity.SKIPPED
+    ]
+    if failed_names:
+        status = STATUS_FAILED
+        note = f"Benchmark failed: {', '.join(dict.fromkeys(failed_names))}"[:200]
+    else:
+        status = STATUS_VERIFIED
+        note = "Benchmark passed"
 
-    add_verification_record(
+    updated = record_verification_result(
         model_id=model_name,
         arch_id=architecture_id,
-        notes="Benchmark passed",
+        status=status,
+        note=note,
+        phase_scores=phase_scores,
         verified_by="main_benchmark",
     )
 
