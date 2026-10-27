@@ -483,6 +483,92 @@ class TestVerificationHistory:
         assert history.get_record("org/m", "NewArch") is None
         assert not history.is_verified("org/m", "NewArch")
 
+    def test_isolated_legacy_crash_record_is_not_verified(self):
+        """A lone legacy OOM-crash record (no result field) must not read as a pass."""
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        crash = VerificationRecord.from_dict(
+            {
+                "model_id": "bigscience/bloom-3b",
+                "architecture_id": "BloomForCausalLM",
+                "verified_date": "2026-02-21",
+                "verified_by": "verify_models",
+                "transformerlens_version": None,
+                "notes": "Process crash during benchmark (likely OOM)",
+                "invalidated": False,
+                "invalidation_reason": None,
+            }
+        )
+        history = VerificationHistory(records=[crash])
+
+        assert crash.result is None
+        assert crash.effective_result == "failed"
+        assert not history.is_verified("bigscience/bloom-3b")
+        # The attempt itself is still visible as the latest record.
+        assert history.get_record("bigscience/bloom-3b") is crash
+
+    def test_later_passing_retry_restores_verification(self):
+        """fail -> pass: the latest attempt wins, so the model is verified again."""
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        history = VerificationHistory()
+        history.add_record(
+            VerificationRecord(
+                model_id="bigscience/bloom-3b",
+                architecture_id="BloomForCausalLM",
+                verified_date=date(2026, 2, 21),
+                notes="Process crash during benchmark (likely OOM)",
+            )
+        )
+        assert not history.is_verified("bigscience/bloom-3b")
+
+        retry = VerificationRecord(
+            model_id="bigscience/bloom-3b",
+            architecture_id="BloomForCausalLM",
+            verified_date=date(2026, 2, 22),
+            result="passed",
+            notes="Benchmark passed",
+        )
+        history.add_record(retry)
+        assert history.is_verified("bigscience/bloom-3b")
+        assert history.get_record("bigscience/bloom-3b") is retry
+        # Both attempts stay in the audit trail.
+        assert len(history.records) == 2
+
+    def test_invalidating_latest_falls_back_to_earlier_valid_attempt(self):
+        from transformer_lens.tools.model_registry.verification import (
+            VerificationHistory,
+            VerificationRecord,
+        )
+
+        history = VerificationHistory()
+        first = VerificationRecord(
+            model_id="gpt2", verified_date=date(2026, 1, 1), result="passed", notes="first"
+        )
+        second = VerificationRecord(
+            model_id="gpt2", verified_date=date(2026, 2, 1), result="passed", notes="second"
+        )
+        history.add_record(first)
+        history.add_record(second)
+
+        assert history.invalidate("gpt2", "stale") is True
+        assert second.invalidated and second.invalidation_reason == "stale"
+        assert history.get_record("gpt2") is first
+        assert history.is_verified("gpt2")
+
+        # Invalidating again removes the last valid attempt; records are never deleted.
+        assert history.invalidate("gpt2", "also stale") is True
+        assert history.get_record("gpt2") is None
+        assert not history.is_verified("gpt2")
+        assert history.invalidate("gpt2", "nothing left") is False
+        assert len(history.records) == 2
+
 
 # ============================================================
 # Test api.py (with fixture data dir)
